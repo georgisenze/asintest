@@ -103,7 +103,7 @@ paths:
                 type: object
                 required: [jeton, type, expire_le, utilisateur]
                 properties:
-                  jeton: { type: string, description: Jeton à envoyer dans `Authorization: Bearer <jeton>` }
+                  jeton: { type: string, description: "Jeton à envoyer dans l'en-tête Authorization: Bearer <jeton>" }
                   type: { type: string, enum: [Bearer] }
                   expire_le:
                     oneOf:
@@ -742,9 +742,9 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Erreur' }
               examples:
-                PAS_UN_MINISTERE:
+                STRUCTURE_NON_MINISTERE:
                   value:
-                    erreur: PAS_UN_MINISTERE
+                    erreur: STRUCTURE_NON_MINISTERE
                     message: La structure DGS est de type DIRECTION_GENERALE, pas MINISTERE.
                     details: { code: DGS, type: DIRECTION_GENERALE }
                 VALIDATION_ECHOUEE:
@@ -890,7 +890,7 @@ components:
             - PARENT_INTROUVABLE
             - CODE_NON_MODIFIABLE
             - ENTETE_CSV_INVALIDE
-            - PAS_UN_MINISTERE
+            - STRUCTURE_NON_MINISTERE
             - NON_AUTHENTIFIE
             - IDENTIFIANTS_INVALIDES
             - ACCES_REFUSE
