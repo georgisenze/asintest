@@ -2,13 +2,27 @@
 
 namespace App\Http\Controllers;
 
-use App\Exceptions\ApiException;
+use App\Http\Requests\ArborescenceRequest;
+use App\Services\ArborescenceService;
+use Illuminate\Http\JsonResponse;
 
-/** Squelette : à implémenter. */
+/** F8 */
 class ArborescenceController extends Controller
 {
-    public function __invoke(): never
+    public function __construct(private readonly ArborescenceService $service) {}
+
+    public function __invoke(ArborescenceRequest $request, string $code): JsonResponse
     {
-        throw new ApiException(501, 'NON_IMPLEMENTE', 'Fonction non encore implémentée.');
+        $date = $request->dateDemandee();
+        $resultat = $this->service->arborescence($code, $date, $request->inclureInactives());
+
+        return response()->json([
+            'data' => $resultat['arbre'],
+            'statistiques' => $resultat['statistiques'],
+            'parametres' => [
+                'date' => $date?->toIso8601ZuluString(),
+                'inclure_inactives' => $request->inclureInactives(),
+            ],
+        ], 200, [], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     }
 }
