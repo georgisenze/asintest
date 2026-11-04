@@ -107,3 +107,13 @@ Toutes les hypothèses sont détaillées dans [docs/SPECIFICATION.md](docs/SPECI
 - La synchronisation fonctionne par interrogation périodique. Une évolution possible : des webhooks ou des événements publiés à chaque écriture.
 - Le serveur applicatif est `php artisan serve` avec plusieurs workers, ce qui suffit pour le test. En production, il faudrait php-fpm et nginx, avec un cache de configuration et de routes.
 - Le sujet détaillé n'ayant pas été fourni, les règles R1 à R7 et les fonctions F1 à F10 suivent les hypothèses de `docs/SPECIFICATION.md`. Elles sont à confronter au sujet réel.
+
+## Swagger UI
+
+Pour tester l'API depuis le navigateur, ouvrir http://localhost:8000/docs. La page charge le contrat [docs/openapi.yaml](docs/openapi.yaml), également servi sur `/docs/openapi.yaml`.
+
+1. Ouvrir `POST /auth/login`, cliquer sur "Try it out" et envoyer `admin@referentiel.local` / `password`.
+2. Copier le champ `jeton` de la réponse.
+3. Cliquer sur **Authorize**, coller le jeton, puis appeler n'importe quel endpoint.
+
+Swagger UI est chargé depuis le CDN unpkg : la page demande donc un accès à Internet.
