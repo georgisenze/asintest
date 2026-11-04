@@ -1,0 +1,1207 @@
+openapi: 3.1.0
+info:
+  title: Référentiel des structures administratives de l'État
+  version: 1.0.0
+  description: |
+    API de référentiel des ministères, directions générales, directions et services,
+    consommée par plusieurs applications.
+
+    Conventions :
+    - Toutes les réponses sont en JSON (y compris les erreurs), encodées en UTF-8.
+    - Les dates sont stockées en UTC et renvoyées en ISO 8601 Zulu (`2026-11-04T10:00:00Z`).
+      En entrée, toute date ISO 8601 avec fuseau est acceptée.
+    - Le `code` d'une structure est son identifiant métier : majuscules, 2 à 30 caractères
+      parmi A à Z, 0 à 9, tiret et souligné, immuable. Il est normalisé en majuscules en entrée.
+    - Toute erreur suit le format unique `Erreur` : `{erreur, message, details}`.
+      422 saisie invalide, 409 action interdite par l'état des données, 404 introuvable,
+      401 non authentifié. Aucune entrée utilisateur ne provoque de 500.
+
+    Hiérarchie des types (R2) :
+    - MINISTERE : aucun parent ;
+    - DIRECTION_GENERALE : parent MINISTERE ;
+    - DIRECTION : parent MINISTERE ou DIRECTION_GENERALE ;
+    - SERVICE : parent DIRECTION_GENERALE ou DIRECTION.
+  contact:
+    name: Équipe référentiel
+servers:
+  - url: http://localhost:8000/api
+    description: Environnement Docker local
+security:
+  - sanctum: []
+tags:
+  - name: Santé
+  - name: Authentification
+  - name: Structures
+  - name: Synchronisation
+  - name: Import
+  - name: Ministères
+
+paths:
+  /sante:
+    get:
+      tags: [Santé]
+      summary: Vérifie que l'API et la base de données répondent
+      operationId: sante
+      security: []
+      responses:
+        '200':
+          description: Service opérationnel
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [statut, base_de_donnees, horodatage]
+                properties:
+                  statut: { type: string, enum: [ok] }
+                  base_de_donnees: { type: string, enum: [ok] }
+                  horodatage: { $ref: '#/components/schemas/DateHeure' }
+              example:
+                statut: ok
+                base_de_donnees: ok
+                horodatage: '2026-11-04T10:00:00Z'
+        '503':
+          description: Base de données injoignable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Erreur' }
+              example:
+                erreur: BASE_INDISPONIBLE
+                message: La base de données est injoignable.
+                details: {}
+
+  /auth/login:
+    post:
+      tags: [Authentification]
+      summary: Ouvre une session et renvoie un jeton Bearer
+      description: Limité à 10 tentatives par minute.
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email, maxLength: 255 }
+                password: { type: string, maxLength: 255 }
+                nom_appareil:
+                  type: string
+                  maxLength: 100
+                  description: Nom donné au jeton (application consommatrice). Défaut `api`.
+            example:
+              email: admin@referentiel.local
+              password: password
+              nom_appareil: application-rh
+      responses:
+        '200':
+          description: Authentification réussie
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [jeton, type, expire_le, utilisateur]
+                properties:
+                  jeton: { type: string, description: Jeton à envoyer dans `Authorization: Bearer <jeton>` }
+                  type: { type: string, enum: [Bearer] }
+                  expire_le:
+                    oneOf:
+                      - { $ref: '#/components/schemas/DateHeure' }
+                      - { type: 'null' }
+                  utilisateur: { $ref: '#/components/schemas/Utilisateur' }
+              example:
+                jeton: 1|Zx8vQ3n0fJp2Lk7sTq9wYbR4mC6dE1aH5gU0iO2l
+                type: Bearer
+                expire_le: '2026-11-04T18:00:00Z'
+                utilisateur: { id: 1, nom: Administrateur du référentiel, email: admin@referentiel.local }
+        '401':
+          description: Identifiants incorrects
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Erreur' }
+              example:
+                erreur: IDENTIFIANTS_INVALIDES
+                message: Adresse e-mail ou mot de passe incorrect.
+                details: {}
+        '422': { $ref: '#/components/responses/ValidationEchouee' }
+        '429': { $ref: '#/components/responses/TropDeRequetes' }
+
+  /auth/logout:
+    post:
+      tags: [Authentification]
+      summary: Révoque le jeton courant
+      operationId: logout
+      responses:
+        '204': { description: Jeton révoqué }
+        '401': { $ref: '#/components/responses/NonAuthentifie' }
+
+  /auth/me:
+    get:
+      tags: [Authentification]
+      summary: Utilisateur courant
+      operationId: me
+      responses:
+        '200':
+          description: Utilisateur authentifié
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Utilisateur' }
+              example: { id: 1, nom: Administrateur du référentiel, email: admin@referentiel.local }
+        '401': { $ref: '#/components/responses/NonAuthentifie' }
+
+  /structures:
+    get:
+      tags: [Structures]
+      summary: F3, recherche paginée de structures
+      description: |
+        Le paramètre `q` cherche dans le code, le sigle et le libellé, sans tenir compte
+        de la casse ni des accents (`education` trouve « Éducation »).
+      operationId: rechercherStructures
+      parameters:
+        - name: q
+          in: query
+          schema: { type: string, maxLength: 255 }
+          example: sante
+        - name: type
+          in: query
+          schema: { $ref: '#/components/schemas/TypeStructure' }
+        - name: statut
+          in: query
+          schema: { $ref: '#/components/schemas/StatutStructure' }
+        - name: code_parent
+          in: query
+          description: Filles directes de cette structure
+          schema: { $ref: '#/components/schemas/Code' }
+        - name: code_ministere
+          in: query
+          description: Toute la descendance de ce ministère (ministère inclus)
+          schema: { $ref: '#/components/schemas/Code' }
+        - name: tri
+          in: query
+          description: Champ de tri, préfixé par `-` pour l'ordre décroissant. Défaut `code`.
+          schema:
+            type: string
+            enum: [code, -code, libelle, -libelle, sigle, -sigle, type, -type, updated_at, -updated_at]
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/ParPage'
+      responses:
+        '200':
+          description: Page de résultats
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PageStructures' }
+              example:
+                data:
+                  - code: MIN-SANTE
+                    sigle: MSHP
+                    libelle: Ministère de la Santé et de l'Hygiène publique
+                    type: MINISTERE
+                    statut: ACTIVE
+                    code_parent: null
+                    date_desactivation: null
+                    motif_desactivation: null
+                    version: 1
+                    cree_le: '2026-11-04T09:00:00Z'
+                    modifie_le: '2026-11-04T09:00:00Z'
+                links:
+                  first: http://localhost:8000/api/structures?q=sante&page=1
+                  last: http://localhost:8000/api/structures?q=sante&page=1
+                  prev: null
+                  next: null
+                meta:
+                  current_page: 1
+                  from: 1
+                  last_page: 1
+                  path: http://localhost:8000/api/structures
+                  per_page: 20
+                  to: 1
+                  total: 1
+        '401': { $ref: '#/components/responses/NonAuthentifie' }
+        '422': { $ref: '#/components/responses/ValidationEchouee' }
+    post:
+      tags: [Structures]
+      summary: F1, crée une structure
+      description: |
+        Règles appliquées : R1 (code unique et au bon format), R2 (type compatible avec
+        le parent), R3 (parent actif), R7 (sigle unique parmi les structures actives
+        de même parent). La création est historisée (action CREATION).
+      operationId: creerStructure
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreationStructure' }
+            example:
+              code: DSIM-SNUT
+              sigle: SNUT
+              libelle: Service de la Nutrition
+              type: SERVICE
+              code_parent: DSIM
+      responses:
+        '201':
+          description: Structure créée
+          headers:
+            Location:
+              description: URL de la structure créée
+              schema: { type: string, format: uri }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReponseStructureDetail' }
+        '401': { $ref: '#/components/responses/NonAuthentifie' }
+        '409':
+          description: Conflit avec l'état des données
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Erreur' }
+              examples:
+                CODE_EXISTANT:
+                  value:
+                    erreur: CODE_EXISTANT
+                    message: Une structure de code DSIM existe déjà.
+                    details: { code: DSIM }
+                PARENT_INACTIF:
+                  value:
+                    erreur: PARENT_INACTIF
+                    message: 'Impossible de rattacher DGTCP-SNOUV à DGTCP-SCAISSE : la structure parente est inactive.'
+                    details: { code: DGTCP-SNOUV, code_parent: DGTCP-SCAISSE }
+                SIGLE_EN_DOUBLON:
+                  value:
+                    erreur: SIGLE_EN_DOUBLON
+                    message: Le sigle SVAC demandé pour DSIM-SVAC2 est déjà utilisé par la structure active DSIM-SVAC au même niveau de rattachement.
+                    details: { code: DSIM-SVAC2, sigle: SVAC, code_existant: DSIM-SVAC }
+                CONFLIT_UNICITE:
+                  summary: Création concurrente du même code
+                  value:
+                    erreur: CONFLIT_UNICITE
+                    message: Une donnée identique existe déjà (contrainte d'unicité).
+                    details: {}
+        '422':
+          description: Saisie invalide
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Erreur' }
+              examples:
+                VALIDATION_ECHOUEE:
+                  value:
+                    erreur: VALIDATION_ECHOUEE
+                    message: Les données fournies sont invalides.
+                    details:
+                      code: ['Le code doit contenir de 2 à 30 caractères parmi A à Z, 0 à 9, tiret et souligné, et commencer par une lettre ou un chiffre.']
+                      libelle: ['Le champ libellé est obligatoire.']
+                HIERARCHIE_INVALIDE:
+                  value:
+                    erreur: HIERARCHIE_INVALIDE
+                    message: 'La structure DSIM-SNUT de type SERVICE ne peut pas être rattachée à MIN-SANTE de type MINISTERE. Types de parent autorisés : DIRECTION_GENERALE, DIRECTION.'
+                    details:
+                      code: DSIM-SNUT
+                      type: SERVICE
+                      code_parent: MIN-SANTE
+                      type_parent: MINISTERE
+                      types_parent_autorises: [DIRECTION_GENERALE, DIRECTION]
+                PARENT_INTROUVABLE:
+                  value:
+                    erreur: PARENT_INTROUVABLE
+                    message: La structure parente DSIX indiquée pour DSIM-SNUT n'existe pas.
+                    details: { code: DSIM-SNUT, code_parent: DSIX }
+                JSON_INVALIDE:
+                  value:
+                    erreur: JSON_INVALIDE
+                    message: Le corps de la requête n'est pas un JSON valide.
+                    details: { analyse: Syntax error }
+
+  /structures/synchronisation:
+    get:
+      tags: [Synchronisation]
+      summary: F6, structures modifiées depuis une date
+      description: |
+        Renvoie toutes les structures (inactives comprises) dont la dernière modification
+        est strictement postérieure à `depuis`, triées par date de modification puis code.
+        Le client conserve `horodatage_serveur` et le renvoie comme `depuis` à l'appel suivant.
+        Si `a_suivre` vaut true, rappeler avec le `curseur` renvoyé pour obtenir la suite.
+      operationId: synchroniser
+      parameters:
+        - name: depuis
+          in: query
+          required: true
+          description: Date ISO 8601 avec fuseau
+          schema: { type: string, format: date-time }
+          example: '2026-11-01T00:00:00Z'
+        - name: curseur
+          in: query
+          description: Curseur opaque renvoyé par l'appel précédent
+          schema: { type: string }
+        - $ref: '#/components/parameters/ParPage'
+      responses:
+        '200':
+          description: Lot de structures modifiées
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Synchronisation' }
+              example:
+                depuis: '2026-11-01T00:00:00Z'
+                horodatage_serveur: '2026-11-04T10:00:00Z'
+                nombre: 1
+                a_suivre: false
+                curseur: null
+                data:
+                  - code: DGTCP-SCAISSE
+                    sigle: SCAISSE
+                    libelle: Service de la Caisse centrale
+                    type: SERVICE
+                    statut: INACTIVE
+                    code_parent: DGTCP
+                    date_desactivation: '2026-11-03T15:20:00Z'
+                    motif_desactivation: Fusion avec le Service des Recettes
+                    version: 2
+                    cree_le: '2026-10-01T08:00:00Z'
+                    modifie_le: '2026-11-03T15:20:00Z'
+        '401': { $ref: '#/components/responses/NonAuthentifie' }
+        '422':
+          description: Paramètre `depuis` absent, mal formé ou dans le futur
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Erreur' }
+              example:
+                erreur: VALIDATION_ECHOUEE
+                message: Les données fournies sont invalides.
+                details:
+                  depuis: ['Le champ date de départ est obligatoire.']
+
+  /structures/import:
+    post:
+      tags: [Import]
+      summary: F7, import CSV de structures avec rapport
+      description: |
+        Fichier CSV UTF-8 (séparateur `;` ou `,`, détecté), en-tête obligatoire :
+        `code;sigle;libelle;type;code_parent`. Chaque ligne est traitée dans sa propre
+        transaction avec les mêmes règles que la création (R1 à R4, R7) ; une ligne peut
+        référencer comme parent une structure créée par une ligne précédente.
+        Le rapport détaille le sort de chaque ligne. Avec `simulation=true`, rien n'est
+        enregistré.
+      operationId: importerStructures
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [fichier]
+              properties:
+                fichier:
+                  type: string
+                  format: binary
+                  description: Fichier .csv ou .txt, 5 Mo maximum
+                simulation:
+                  type: boolean
+                  default: false
+      responses:
+        '200':
+          description: Rapport d'import (même si certaines lignes sont en erreur)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RapportImport' }
+              example:
+                simulation: false
+                total_lignes: 3
+                crees: 2
+                en_erreur: 1
+                lignes:
+                  - { ligne: 2, code: DSI-SANTE, statut: CREEE, erreur: null, message: null }
+                  - { ligne: 3, code: DSI-SANTE-SRES, statut: CREEE, erreur: null, message: null }
+                  - ligne: 4
+                    code: DGS
+                    statut: ERREUR
+                    erreur: CODE_EXISTANT
+                    message: Une structure de code DGS existe déjà.
+        '401': { $ref: '#/components/responses/NonAuthentifie' }
+        '413': { $ref: '#/components/responses/RequeteTropVolumineuse' }
+        '422':
+          description: Fichier absent, illisible, vide ou en-tête invalide
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Erreur' }
+              examples:
+                VALIDATION_ECHOUEE:
+                  value:
+                    erreur: VALIDATION_ECHOUEE
+                    message: Les données fournies sont invalides.
+                    details: { fichier: ['Le champ fichier est obligatoire.'] }
+                ENTETE_CSV_INVALIDE:
+                  value:
+                    erreur: ENTETE_CSV_INVALIDE
+                    message: 'En-tête CSV invalide : colonnes attendues code, sigle, libelle, type, code_parent.'
+                    details: { colonnes_manquantes: [type] }
+
+  /structures/{code}:
+    parameters:
+      - $ref: '#/components/parameters/CodeStructure'
+    get:
+      tags: [Structures]
+      summary: F2, consulte une structure avec son parent, ses filles et son chemin
+      operationId: consulterStructure
+      responses:
+        '200':
+          description: Structure détaillée
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReponseStructureDetail' }
+        '401': { $ref: '#/components/responses/NonAuthentifie' }
+        '404': { $ref: '#/components/responses/StructureIntrouvable' }
+    patch:
+      tags: [Structures]
+      summary: F4, modifie une structure
+      description: |
+        Champs modifiables : sigle, libelle, type, code_parent (null pour une structure racine).
+        Le code n'est pas modifiable (R1). Règles : R2, R3 (nouveau parent actif),
+        R4 (pas de cycle, filles compatibles avec le nouveau type), R7.
+        Si `version` est fourni et ne correspond plus, la modification est refusée (409).
+        Une modification sans changement effectif ne crée ni nouvelle version ni historique.
+        Chaque modification effective est historisée (R6).
+      operationId: modifierStructure
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ModificationStructure' }
+            example:
+              libelle: Direction des Soins infirmiers, maternels et infantiles
+              code_parent: MIN-SANTE
+              version: 1
+              motif: Réorganisation 2026
+      responses:
+        '200':
+          description: Structure modifiée
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReponseStructureDetail' }
+        '401': { $ref: '#/components/responses/NonAuthentifie' }
+        '404': { $ref: '#/components/responses/StructureIntrouvable' }
+        '409':
+          description: Conflit avec l'état des données
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Erreur' }
+              examples:
+                STRUCTURE_INACTIVE:
+                  value:
+                    erreur: STRUCTURE_INACTIVE
+                    message: La structure DGTCP-SCAISSE est inactive et ne peut plus être modifiée.
+                    details: { code: DGTCP-SCAISSE }
+                VERSION_OBSOLETE:
+                  value:
+                    erreur: VERSION_OBSOLETE
+                    message: La structure DSIM a été modifiée entre-temps (version actuelle 3, version fournie 2). Rechargez-la avant de la modifier.
+                    details: { code: DSIM, version_actuelle: 3, version_fournie: 2 }
+                PARENT_INACTIF:
+                  value:
+                    erreur: PARENT_INACTIF
+                    message: 'Impossible de rattacher DSIM-SPF à DGTCP-SCAISSE : la structure parente est inactive.'
+                    details: { code: DSIM-SPF, code_parent: DGTCP-SCAISSE }
+                CYCLE_HIERARCHIQUE:
+                  value:
+                    erreur: CYCLE_HIERARCHIQUE
+                    message: 'Impossible de rattacher DGS à DSIM : DSIM est la structure elle-même ou l''une de ses descendantes.'
+                    details: { code: DGS, code_parent: DSIM }
+                FILLES_INCOMPATIBLES:
+                  value:
+                    erreur: FILLES_INCOMPATIBLES
+                    message: 'Impossible de passer DSIM en type SERVICE : les structures filles DSIM-SPF, DSIM-SVAC ne pourraient plus y être rattachées.'
+                    details: { code: DSIM, type: SERVICE, filles_incompatibles: [DSIM-SPF, DSIM-SVAC] }
+                SIGLE_EN_DOUBLON:
+                  value:
+                    erreur: SIGLE_EN_DOUBLON
+                    message: Le sigle SPF demandé pour DSIM-SVAC est déjà utilisé par la structure active DSIM-SPF au même niveau de rattachement.
+                    details: { code: DSIM-SVAC, sigle: SPF, code_existant: DSIM-SPF }
+        '422':
+          description: Saisie invalide
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Erreur' }
+              examples:
+                VALIDATION_ECHOUEE:
+                  value:
+                    erreur: VALIDATION_ECHOUEE
+                    message: Les données fournies sont invalides.
+                    details:
+                      modification: ['Au moins un champ parmi sigle, libelle, type, code_parent doit être fourni.']
+                CODE_NON_MODIFIABLE:
+                  value:
+                    erreur: CODE_NON_MODIFIABLE
+                    message: Le code de la structure DSIM n'est pas modifiable.
+                    details: { code: DSIM }
+                HIERARCHIE_INVALIDE:
+                  value:
+                    erreur: HIERARCHIE_INVALIDE
+                    message: 'La structure DSIM de type DIRECTION doit être rattachée à une structure de type MINISTERE ou DIRECTION_GENERALE.'
+                    details: { code: DSIM, type: DIRECTION, types_parent_autorises: [MINISTERE, DIRECTION_GENERALE] }
+                PARENT_INTROUVABLE:
+                  value:
+                    erreur: PARENT_INTROUVABLE
+                    message: La structure parente DGX indiquée pour DSIM n'existe pas.
+                    details: { code: DSIM, code_parent: DGX }
+
+  /structures/{code}/historique:
+    parameters:
+      - $ref: '#/components/parameters/CodeStructure'
+    get:
+      tags: [Structures]
+      summary: Historique paginé d'une structure, plus récent d'abord
+      operationId: historiqueStructure
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/ParPage'
+      responses:
+        '200':
+          description: Page d'historique
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PageHistorique' }
+              example:
+                data:
+                  - action: MODIFICATION
+                    effectue_le: '2026-11-04T09:30:00Z'
+                    utilisateur: admin@referentiel.local
+                    motif: Réorganisation 2026
+                    champs_modifies: [libelle]
+                    donnees_avant:
+                      code: DSIM
+                      sigle: DSIM
+                      libelle: Direction des Soins infirmiers et maternels
+                      type: DIRECTION
+                      statut: ACTIVE
+                      code_parent: DGS
+                      date_desactivation: null
+                      motif_desactivation: null
+                    donnees_apres:
+                      code: DSIM
+                      sigle: DSIM
+                      libelle: Direction des Soins infirmiers, maternels et infantiles
+                      type: DIRECTION
+                      statut: ACTIVE
+                      code_parent: DGS
+                      date_desactivation: null
+                      motif_desactivation: null
+                links: { first: 'http://localhost:8000/api/structures/DSIM/historique?page=1', last: 'http://localhost:8000/api/structures/DSIM/historique?page=1', prev: null, next: null }
+                meta: { current_page: 1, from: 1, last_page: 1, path: 'http://localhost:8000/api/structures/DSIM/historique', per_page: 20, to: 1, total: 1 }
+        '401': { $ref: '#/components/responses/NonAuthentifie' }
+        '404': { $ref: '#/components/responses/StructureIntrouvable' }
+
+  /structures/{code}/desactivation:
+    parameters:
+      - $ref: '#/components/parameters/CodeStructure'
+    post:
+      tags: [Structures]
+      summary: F5, désactive une structure
+      description: |
+        Interdit si la structure a au moins une fille active (R5). La désactivation
+        est historisée (R6). Une structure désactivée reste consultable.
+      operationId: desactiverStructure
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [motif]
+              properties:
+                motif: { type: string, minLength: 3, maxLength: 1000 }
+            example:
+              motif: Fusion avec le Service des Recettes
+      responses:
+        '200':
+          description: Structure désactivée
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReponseStructureDetail' }
+        '401': { $ref: '#/components/responses/NonAuthentifie' }
+        '404': { $ref: '#/components/responses/StructureIntrouvable' }
+        '409':
+          description: Désactivation interdite par l'état des données
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Erreur' }
+              examples:
+                FILLES_ACTIVES:
+                  value:
+                    erreur: FILLES_ACTIVES
+                    message: 'Impossible de désactiver DSIM : elle a encore 2 structure(s) fille(s) active(s) (DSIM-SPF, DSIM-SVAC). Désactivez-les ou rattachez-les ailleurs d''abord.'
+                    details: { code: DSIM, filles_actives: [DSIM-SPF, DSIM-SVAC] }
+                STRUCTURE_DEJA_INACTIVE:
+                  value:
+                    erreur: STRUCTURE_DEJA_INACTIVE
+                    message: La structure DGTCP-SCAISSE est déjà inactive.
+                    details: { code: DGTCP-SCAISSE }
+        '422': { $ref: '#/components/responses/ValidationEchouee' }
+
+  /structures/{code}/etat:
+    parameters:
+      - $ref: '#/components/parameters/CodeStructure'
+    get:
+      tags: [Structures]
+      summary: F9, état d'une structure à une date passée
+      description: |
+        Reconstruit l'état de la structure à la date demandée à partir de son historique
+        (dernier instantané enregistré à cette date ou avant).
+      operationId: etatStructure
+      parameters:
+        - name: date
+          in: query
+          required: true
+          description: Date ISO 8601 avec fuseau, pas dans le futur
+          schema: { type: string, format: date-time }
+          example: '2026-10-15T00:00:00Z'
+      responses:
+        '200':
+          description: État à la date demandée
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EtatStructure' }
+              example:
+                date: '2026-10-15T00:00:00Z'
+                existait: true
+                etat:
+                  code: DSIM
+                  sigle: DSIM
+                  libelle: Direction des Soins infirmiers et maternels
+                  type: DIRECTION
+                  statut: ACTIVE
+                  code_parent: DGS
+                  date_desactivation: null
+                  motif_desactivation: null
+                depuis_le: '2026-10-01T08:00:00Z'
+        '401': { $ref: '#/components/responses/NonAuthentifie' }
+        '404':
+          description: Structure introuvable, ou inexistante à la date demandée
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Erreur' }
+              examples:
+                STRUCTURE_INTROUVABLE:
+                  value:
+                    erreur: STRUCTURE_INTROUVABLE
+                    message: La structure de code DSIX est introuvable.
+                    details: { code: DSIX }
+                STRUCTURE_INEXISTANTE_A_DATE:
+                  value:
+                    erreur: STRUCTURE_INEXISTANTE_A_DATE
+                    message: La structure DSIM n'existait pas au 2020-01-01T00:00:00Z.
+                    details: { code: DSIM, date: '2020-01-01T00:00:00Z' }
+        '422': { $ref: '#/components/responses/ValidationEchouee' }
+
+  /ministeres/{code}/arborescence:
+    parameters:
+      - $ref: '#/components/parameters/CodeStructure'
+    get:
+      tags: [Ministères]
+      summary: F8, arborescence complète d'un ministère
+      operationId: arborescenceMinistere
+      parameters:
+        - name: inclure_inactives
+          in: query
+          schema: { type: boolean, default: false }
+        - name: date
+          in: query
+          description: Si fourni, arborescence telle qu'elle était à cette date (F9)
+          schema: { type: string, format: date-time }
+      responses:
+        '200':
+          description: Arbre du ministère
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Arborescence' }
+              example:
+                date: null
+                inclure_inactives: false
+                nombre_structures: 4
+                data:
+                  code: MIN-SANTE
+                  sigle: MSHP
+                  libelle: Ministère de la Santé et de l'Hygiène publique
+                  type: MINISTERE
+                  statut: ACTIVE
+                  filles:
+                    - code: DGS
+                      sigle: DGS
+                      libelle: Direction générale de la Santé
+                      type: DIRECTION_GENERALE
+                      statut: ACTIVE
+                      filles:
+                        - code: DSIM
+                          sigle: DSIM
+                          libelle: Direction des Soins infirmiers et maternels
+                          type: DIRECTION
+                          statut: ACTIVE
+                          filles:
+                            - { code: DSIM-SPF, sigle: SPF, libelle: Service de la Planification familiale, type: SERVICE, statut: ACTIVE, filles: [] }
+        '401': { $ref: '#/components/responses/NonAuthentifie' }
+        '404': { $ref: '#/components/responses/StructureIntrouvable' }
+        '422':
+          description: La structure n'est pas un ministère, ou paramètre invalide
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Erreur' }
+              examples:
+                PAS_UN_MINISTERE:
+                  value:
+                    erreur: PAS_UN_MINISTERE
+                    message: La structure DGS est de type DIRECTION_GENERALE, pas MINISTERE.
+                    details: { code: DGS, type: DIRECTION_GENERALE }
+                VALIDATION_ECHOUEE:
+                  value:
+                    erreur: VALIDATION_ECHOUEE
+                    message: Les données fournies sont invalides.
+                    details: { date: ['Le champ date doit être une date valide.'] }
+
+components:
+  securitySchemes:
+    sanctum:
+      type: http
+      scheme: bearer
+      description: Jeton Sanctum obtenu via POST /auth/login
+
+  parameters:
+    CodeStructure:
+      name: code
+      in: path
+      required: true
+      description: Code métier de la structure (insensible à la casse en entrée)
+      schema: { $ref: '#/components/schemas/Code' }
+      example: DSIM
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    ParPage:
+      name: par_page
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+
+  responses:
+    NonAuthentifie:
+      description: Jeton absent, invalide ou expiré
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Erreur' }
+          example:
+            erreur: NON_AUTHENTIFIE
+            message: 'Authentification requise : jeton absent, invalide ou expiré.'
+            details: {}
+    StructureIntrouvable:
+      description: Aucune structure avec ce code
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Erreur' }
+          example:
+            erreur: STRUCTURE_INTROUVABLE
+            message: La structure de code DSIX est introuvable.
+            details: { code: DSIX }
+    ValidationEchouee:
+      description: Saisie invalide (détail par champ)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Erreur' }
+          examples:
+            VALIDATION_ECHOUEE:
+              value:
+                erreur: VALIDATION_ECHOUEE
+                message: Les données fournies sont invalides.
+                details:
+                  motif: ['Le champ motif est obligatoire.']
+            JSON_INVALIDE:
+              value:
+                erreur: JSON_INVALIDE
+                message: Le corps de la requête n'est pas un JSON valide.
+                details: { analyse: Syntax error }
+            DONNEE_INVALIDE:
+              value:
+                erreur: DONNEE_INVALIDE
+                message: Une valeur fournie a un format ou une taille non accepté.
+                details: {}
+    TropDeRequetes:
+      description: Trop de tentatives
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Erreur' }
+          example:
+            erreur: TROP_DE_REQUETES
+            message: Trop de requêtes. Réessayez plus tard.
+            details: {}
+    RequeteTropVolumineuse:
+      description: Corps de requête trop volumineux
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Erreur' }
+          example:
+            erreur: REQUETE_TROP_VOLUMINEUSE
+            message: Le corps de la requête dépasse la taille autorisée.
+            details: {}
+
+  schemas:
+    DateHeure:
+      type: string
+      format: date-time
+      description: ISO 8601 en UTC (suffixe Z)
+      example: '2026-11-04T10:00:00Z'
+
+    Code:
+      type: string
+      pattern: '^[A-Z0-9][A-Z0-9_-]{1,29}$'
+      minLength: 2
+      maxLength: 30
+      example: DSIM
+
+    TypeStructure:
+      type: string
+      enum: [MINISTERE, DIRECTION_GENERALE, DIRECTION, SERVICE]
+
+    StatutStructure:
+      type: string
+      enum: [ACTIVE, INACTIVE]
+
+    ActionHistorique:
+      type: string
+      enum: [CREATION, MODIFICATION, DESACTIVATION]
+
+    Utilisateur:
+      type: object
+      required: [id, nom, email]
+      properties:
+        id: { type: integer }
+        nom: { type: string }
+        email: { type: string, format: email }
+
+    Erreur:
+      type: object
+      description: Format unique de toutes les erreurs de l'API
+      required: [erreur, message, details]
+      properties:
+        erreur:
+          type: string
+          description: Code d'erreur stable, à utiliser par les applications clientes
+          enum:
+            - VALIDATION_ECHOUEE
+            - JSON_INVALIDE
+            - DONNEE_INVALIDE
+            - HIERARCHIE_INVALIDE
+            - PARENT_INTROUVABLE
+            - CODE_NON_MODIFIABLE
+            - ENTETE_CSV_INVALIDE
+            - PAS_UN_MINISTERE
+            - NON_AUTHENTIFIE
+            - IDENTIFIANTS_INVALIDES
+            - ACCES_REFUSE
+            - STRUCTURE_INTROUVABLE
+            - STRUCTURE_INEXISTANTE_A_DATE
+            - RESSOURCE_INTROUVABLE
+            - ROUTE_INTROUVABLE
+            - METHODE_NON_AUTORISEE
+            - CODE_EXISTANT
+            - PARENT_INACTIF
+            - CYCLE_HIERARCHIQUE
+            - FILLES_INCOMPATIBLES
+            - FILLES_ACTIVES
+            - STRUCTURE_DEJA_INACTIVE
+            - STRUCTURE_INACTIVE
+            - SIGLE_EN_DOUBLON
+            - VERSION_OBSOLETE
+            - CONFLIT_UNICITE
+            - CONFLIT_REFERENCE
+            - CONFLIT_CONCURRENCE
+            - REQUETE_TROP_VOLUMINEUSE
+            - TROP_DE_REQUETES
+            - BASE_INDISPONIBLE
+            - ERREUR_HTTP
+            - ERREUR_INTERNE
+        message:
+          type: string
+          description: Message en français, citant le code de la structure concernée
+        details:
+          type: object
+          additionalProperties: true
+          description: |
+            Informations complémentaires. Pour VALIDATION_ECHOUEE : un tableau de messages
+            par champ. Objet vide si rien à ajouter.
+
+    ResumeStructure:
+      type: object
+      required: [code, sigle, libelle, type, statut]
+      properties:
+        code: { $ref: '#/components/schemas/Code' }
+        sigle: { type: string, maxLength: 30 }
+        libelle: { type: string, maxLength: 255 }
+        type: { $ref: '#/components/schemas/TypeStructure' }
+        statut: { $ref: '#/components/schemas/StatutStructure' }
+      example:
+        code: DGS
+        sigle: DGS
+        libelle: Direction générale de la Santé
+        type: DIRECTION_GENERALE
+        statut: ACTIVE
+
+    Structure:
+      type: object
+      required: [code, sigle, libelle, type, statut, code_parent, date_desactivation, motif_desactivation, version, cree_le, modifie_le]
+      properties:
+        code: { $ref: '#/components/schemas/Code' }
+        sigle: { type: string, maxLength: 30 }
+        libelle: { type: string, maxLength: 255 }
+        type: { $ref: '#/components/schemas/TypeStructure' }
+        statut: { $ref: '#/components/schemas/StatutStructure' }
+        code_parent:
+          oneOf:
+            - { $ref: '#/components/schemas/Code' }
+            - { type: 'null' }
+        date_desactivation:
+          oneOf:
+            - { $ref: '#/components/schemas/DateHeure' }
+            - { type: 'null' }
+        motif_desactivation: { type: [string, 'null'] }
+        version:
+          type: integer
+          minimum: 1
+          description: Incrémentée à chaque écriture ; à renvoyer en modification pour le verrouillage optimiste
+        cree_le: { $ref: '#/components/schemas/DateHeure' }
+        modifie_le: { $ref: '#/components/schemas/DateHeure' }
+
+    StructureDetail:
+      allOf:
+        - $ref: '#/components/schemas/Structure'
+        - type: object
+          required: [parent, filles, chemin]
+          properties:
+            parent:
+              oneOf:
+                - { $ref: '#/components/schemas/ResumeStructure' }
+                - { type: 'null' }
+            filles:
+              type: array
+              description: Filles directes, actives et inactives, triées par code
+              items: { $ref: '#/components/schemas/ResumeStructure' }
+            chemin:
+              type: array
+              description: De la racine (ministère) jusqu'à la structure incluse
+              items: { $ref: '#/components/schemas/ResumeStructure' }
+
+    ReponseStructureDetail:
+      type: object
+      required: [data]
+      properties:
+        data: { $ref: '#/components/schemas/StructureDetail' }
+      example:
+        data:
+          code: DSIM
+          sigle: DSIM
+          libelle: Direction des Soins infirmiers et maternels
+          type: DIRECTION
+          statut: ACTIVE
+          code_parent: DGS
+          date_desactivation: null
+          motif_desactivation: null
+          version: 1
+          cree_le: '2026-11-04T09:00:00Z'
+          modifie_le: '2026-11-04T09:00:00Z'
+          parent: { code: DGS, sigle: DGS, libelle: Direction générale de la Santé, type: DIRECTION_GENERALE, statut: ACTIVE }
+          filles:
+            - { code: DSIM-SPF, sigle: SPF, libelle: Service de la Planification familiale, type: SERVICE, statut: ACTIVE }
+            - { code: DSIM-SVAC, sigle: SVAC, libelle: Service de la Vaccination, type: SERVICE, statut: ACTIVE }
+          chemin:
+            - { code: MIN-SANTE, sigle: MSHP, libelle: Ministère de la Santé et de l'Hygiène publique, type: MINISTERE, statut: ACTIVE }
+            - { code: DGS, sigle: DGS, libelle: Direction générale de la Santé, type: DIRECTION_GENERALE, statut: ACTIVE }
+            - { code: DSIM, sigle: DSIM, libelle: Direction des Soins infirmiers et maternels, type: DIRECTION, statut: ACTIVE }
+
+    CreationStructure:
+      type: object
+      required: [code, sigle, libelle, type]
+      properties:
+        code: { $ref: '#/components/schemas/Code' }
+        sigle: { type: string, maxLength: 30 }
+        libelle: { type: string, minLength: 2, maxLength: 255 }
+        type: { $ref: '#/components/schemas/TypeStructure' }
+        code_parent:
+          description: Obligatoire sauf pour un MINISTERE
+          oneOf:
+            - { $ref: '#/components/schemas/Code' }
+            - { type: 'null' }
+
+    ModificationStructure:
+      type: object
+      description: Au moins un champ parmi sigle, libelle, type, code_parent
+      properties:
+        sigle: { type: string, maxLength: 30 }
+        libelle: { type: string, minLength: 2, maxLength: 255 }
+        type: { $ref: '#/components/schemas/TypeStructure' }
+        code_parent:
+          description: Nouveau rattachement ; null pour une structure racine (MINISTERE)
+          oneOf:
+            - { $ref: '#/components/schemas/Code' }
+            - { type: 'null' }
+        version:
+          type: integer
+          minimum: 1
+          description: Version connue du client (verrouillage optimiste, facultatif)
+        motif:
+          type: [string, 'null']
+          maxLength: 1000
+          description: Motif enregistré dans l'historique
+
+    InstantaneStructure:
+      type: object
+      description: Instantané stocké dans l'historique, suffisant pour reconstruire l'état à une date
+      required: [code, sigle, libelle, type, statut, code_parent, date_desactivation, motif_desactivation]
+      properties:
+        code: { $ref: '#/components/schemas/Code' }
+        sigle: { type: string }
+        libelle: { type: string }
+        type: { $ref: '#/components/schemas/TypeStructure' }
+        statut: { $ref: '#/components/schemas/StatutStructure' }
+        code_parent: { type: [string, 'null'] }
+        date_desactivation: { type: [string, 'null'], format: date-time }
+        motif_desactivation: { type: [string, 'null'] }
+
+    Historique:
+      type: object
+      required: [action, effectue_le, utilisateur, motif, champs_modifies, donnees_avant, donnees_apres]
+      properties:
+        action: { $ref: '#/components/schemas/ActionHistorique' }
+        effectue_le: { $ref: '#/components/schemas/DateHeure' }
+        utilisateur:
+          type: [string, 'null']
+          format: email
+          description: E-mail de l'auteur (null pour une opération système)
+        motif: { type: [string, 'null'] }
+        champs_modifies:
+          type: [array, 'null']
+          items: { type: string }
+          description: Null pour une CREATION
+        donnees_avant:
+          oneOf:
+            - { $ref: '#/components/schemas/InstantaneStructure' }
+            - { type: 'null' }
+        donnees_apres: { $ref: '#/components/schemas/InstantaneStructure' }
+
+    LiensPagination:
+      type: object
+      properties:
+        first: { type: [string, 'null'], format: uri }
+        last: { type: [string, 'null'], format: uri }
+        prev: { type: [string, 'null'], format: uri }
+        next: { type: [string, 'null'], format: uri }
+
+    MetaPagination:
+      type: object
+      properties:
+        current_page: { type: integer }
+        from: { type: [integer, 'null'] }
+        last_page: { type: integer }
+        path: { type: string, format: uri }
+        per_page: { type: integer }
+        to: { type: [integer, 'null'] }
+        total: { type: integer }
+        links:
+          type: array
+          items:
+            type: object
+            properties:
+              url: { type: [string, 'null'] }
+              label: { type: string }
+              active: { type: boolean }
+
+    PageStructures:
+      type: object
+      required: [data, links, meta]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Structure' }
+        links: { $ref: '#/components/schemas/LiensPagination' }
+        meta: { $ref: '#/components/schemas/MetaPagination' }
+
+    PageHistorique:
+      type: object
+      required: [data, links, meta]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Historique' }
+        links: { $ref: '#/components/schemas/LiensPagination' }
+        meta: { $ref: '#/components/schemas/MetaPagination' }
+
+    Synchronisation:
+      type: object
+      required: [depuis, horodatage_serveur, nombre, a_suivre, curseur, data]
+      properties:
+        depuis: { $ref: '#/components/schemas/DateHeure' }
+        horodatage_serveur:
+          $ref: '#/components/schemas/DateHeure'
+        nombre: { type: integer, description: Nombre de structures dans ce lot }
+        a_suivre: { type: boolean, description: True s'il reste des structures à récupérer }
+        curseur:
+          type: [string, 'null']
+          description: À renvoyer pour obtenir le lot suivant
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Structure' }
+
+    LigneRapportImport:
+      type: object
+      required: [ligne, code, statut, erreur, message]
+      properties:
+        ligne: { type: integer, description: Numéro de ligne dans le fichier (en-tête = 1) }
+        code: { type: [string, 'null'] }
+        statut: { type: string, enum: [CREEE, VALIDE, ERREUR], description: VALIDE en mode simulation }
+        erreur:
+          type: [string, 'null']
+          description: Code d'erreur (mêmes codes que la création)
+        message: { type: [string, 'null'] }
+        details:
+          type: object
+          additionalProperties: true
+
+    RapportImport:
+      type: object
+      required: [simulation, total_lignes, crees, en_erreur, lignes]
+      properties:
+        simulation: { type: boolean }
+        total_lignes: { type: integer }
+        crees: { type: integer, description: Lignes créées (ou valides en simulation) }
+        en_erreur: { type: integer }
+        lignes:
+          type: array
+          items: { $ref: '#/components/schemas/LigneRapportImport' }
+
+    EtatStructure:
+      type: object
+      required: [date, existait, etat]
+      properties:
+        date: { $ref: '#/components/schemas/DateHeure' }
+        existait: { type: boolean }
+        etat: { $ref: '#/components/schemas/InstantaneStructure' }
+        depuis_le:
+          $ref: '#/components/schemas/DateHeure'
+          description: Date de l'événement d'historique qui a produit cet état
+
+    NoeudArborescence:
+      allOf:
+        - $ref: '#/components/schemas/ResumeStructure'
+        - type: object
+          required: [filles]
+          properties:
+            filles:
+              type: array
+              items: { $ref: '#/components/schemas/NoeudArborescence' }
+
+    Arborescence:
+      type: object
+      required: [data]
+      properties:
+        date:
+          type: [string, 'null']
+          format: date-time
+          description: Date demandée (null pour l'état courant)
+        inclure_inactives: { type: boolean }
+        nombre_structures: { type: integer }
+        data: { $ref: '#/components/schemas/NoeudArborescence' }
