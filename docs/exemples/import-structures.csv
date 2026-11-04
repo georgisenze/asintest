@@ -1,0 +1,7 @@
+code;sigle;libelle;type;code_parent
+MIN-AGRI;MINADER;Ministère de l'Agriculture et du Développement rural;MINISTERE;
+DGPA;DGPA;Direction générale de la Production agricole;DIRECTION_GENERALE;MIN-AGRI
+DPV-SPHYTO;SPHYTO;Service de la Protection phytosanitaire;SERVICE;DPV
+DPV;DPV;Direction de la Protection des végétaux;DIRECTION;DGPA
+DAF-AGRI;DAF;Direction des Affaires financières;DIRECTION;MIN-AGRI
+DAF-AGRI-SCOMPTA;SCOMPTA;Service de la Comptabilité;SERVICE;DAF-AGRI

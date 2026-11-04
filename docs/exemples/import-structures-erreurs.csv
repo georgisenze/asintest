@@ -1,0 +1,11 @@
+code;sigle;libelle;type;code_parent
+MIN-TRANSP;MT;Ministère des Transports;MINISTERE;
+x;X;Code au format invalide;DIRECTION;MIN-TRANSP
+DG-SANS-PARENT;DGSP;Direction générale sans rattachement;DIRECTION_GENERALE;
+DIR-ORPHELINE;DORPH;Direction rattachée à une ligne en erreur;DIRECTION;DG-SANS-PARENT
+MIN-TRANSP;MT2;Code déjà présent plus haut dans le fichier;MINISTERE;
+DIR-TYPE;DTY;Type inconnu;BUREAU;MIN-TRANSP
+DIR-FANTOME;DFA;Parent inexistant;DIRECTION;MIN-INEXISTANT
+SRV-MAL-PLACE;SMP;Service rattaché directement à un ministère;SERVICE;MIN-TRANSP
+DIR-COLONNES;DCO;Colonne manquante;DIRECTION
+DGTCP-SAUDIT;SAUDIT;Service rattaché à une structure inactive du jeu de démo;SERVICE;DGTCP-SCAISSE

@@ -2,13 +2,23 @@
 
 namespace App\Http\Controllers;
 
-use App\Exceptions\ApiException;
+use App\Http\Requests\ImportStructureRequest;
+use App\Services\ImportStructureService;
+use Illuminate\Http\JsonResponse;
 
-/** Squelette : à implémenter. */
+/** F7 : import CSV de structures avec rapport ligne par ligne. */
 class ImportStructureController extends Controller
 {
-    public function __invoke(): never
+    public function __construct(private readonly ImportStructureService $import) {}
+
+    public function __invoke(ImportStructureRequest $request): JsonResponse
     {
-        throw new ApiException(501, 'NON_IMPLEMENTE', 'Fonction non encore implémentée.');
+        $rapport = $this->import->importer(
+            (string) $request->file('fichier')->get(),
+            $request->boolean('simulation'),
+            $request->user(),
+        );
+
+        return response()->json($rapport, 200, [], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     }
 }
