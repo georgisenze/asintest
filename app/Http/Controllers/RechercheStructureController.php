@@ -2,13 +2,16 @@
 
 namespace App\Http\Controllers;
 
-use App\Exceptions\ApiException;
+use App\Http\Requests\RechercheStructureRequest;
+use App\Http\Resources\StructureResource;
+use App\Services\RechercheStructureService;
+use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 
-/** Squelette : à implémenter. */
+/** F3 : GET /api/structures */
 class RechercheStructureController extends Controller
 {
-    public function __invoke(): never
+    public function __invoke(RechercheStructureRequest $request, RechercheStructureService $service): AnonymousResourceCollection
     {
-        throw new ApiException(501, 'NON_IMPLEMENTE', 'Fonction non encore implémentée.');
+        return StructureResource::collection($service->rechercher($request->validated()));
     }
 }
